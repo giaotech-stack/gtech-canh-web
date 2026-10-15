@@ -1,0 +1,96 @@
+name: canh-web
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      thu_bao_dong:
+        description: "Thử báo động: tạo 1 lỗi giả (404) để kiểm tra Telegram nhận được tin"
+        type: boolean
+        default: false
+
+# actions: write CHỈ dùng cho bước "giữ lịch chạy" bên dưới (gọi REST API enable workflow).
+# Nếu bỏ bước đó thì đổi thành `permissions: { contents: read }`. Không có cách nào khác
+# để GITHUB_TOKEN gọi endpoint này mà không có quyền actions: write.
+permissions:
+  contents: read
+  actions: write
+
+# Không để 2 lượt chạy chồng nhau (state dùng chung qua cache). Lượt mới chờ lượt cũ.
+concurrency:
+  group: canh-web
+  cancel-in-progress: false
+
+jobs:
+  canh:
+    runs-on: ubuntu-latest
+    # Mỗi target bị chặn trên ~75 giây (xem TARGET_BUDGET trong canh.py) => ~9 target/lượt.
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # Khôi phục state của lượt trước (key tiền tố, lấy bản mới nhất).
+      - name: Khôi phục state
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: canh-state
+          key: canh-state-restore-only
+          restore-keys: |
+            canh-state-
+
+      # Giữ lịch: GitHub tự tắt workflow theo lịch ở repo công khai sau 60 ngày không có
+      # hoạt động trong repo. KHÔNG CHẮC việc gọi "enable" (khi workflow đang bật) có tính là
+      # hoạt động để reset đồng hồ 60 ngày hay không: GitHub không cam kết điều này. Bước này
+      # chỉ là nỗ lực tốt nhất; nếu bị tắt, dùng cách dự phòng trong README (tối đa 1 lần/ngày).
+      - name: Giữ lịch chạy (tối đa 1 lần/ngày)
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -u
+          mkdir -p canh-state
+          f=canh-state/keepalive.txt
+          now=$(date +%s)
+          last=0
+          [ -f "$f" ] && last=$(cat "$f")
+          case "$last" in ''|*[!0-9]*) last=0;; esac
+          if [ $((now - last)) -lt 86400 ]; then
+            echo "keepalive: bỏ qua (đã làm trong 24h qua)"
+            exit 0
+          fi
+          code=$(curl -sS --max-time 20 --connect-timeout 10 -o /dev/null -w '%{http_code}' -X PUT \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPO}/actions/workflows/canh-web.yml/enable") || code="curl-loi"
+          if [ "$code" = "204" ]; then
+            # Chỉ ghi mốc thời gian khi thành công; lỗi thì lượt sau (15 phút) thử lại.
+            echo "$now" > "$f"
+            echo "keepalive: HTTP 204 (ok)"
+          else
+            # Không làm đỏ lượt canh vì lỗi phụ này, nhưng báo rõ ràng (không im lặng).
+            echo "keepalive: lỗi HTTP ${code}"
+            echo "::warning::Keepalive không thành công (HTTP ${code}); xem mục 60 ngày trong README"
+          fi
+
+      - name: Canh các target
+        env:
+          TARGETS: ${{ secrets.TARGETS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          THU_BAO_DONG: ${{ inputs.thu_bao_dong }}
+          STATE_FILE: canh-state/state.json
+        run: python3 canh.py
+
+      # always(): lưu state kể cả khi bước trên đỏ (canh.py tự giữ nguyên state của
+      # target mà việc báo thất bại, để lần sau báo lại).
+      - name: Lưu state
+        if: always()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: canh-state
+          key: canh-state-${{ github.run_id }}-${{ github.run_attempt }}

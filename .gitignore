@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+canh-state/
+state.json
+*.tmp
+.DS_Store
