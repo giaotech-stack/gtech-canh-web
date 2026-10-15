@@ -28,5 +28,5 @@
 
 ## Rollback
 
-- Deploy rollback: `<lệnh rollback deploy của repo này>`
+- Deploy rollback: `<lệnh rollback deploy của repo này — hoặc "N/A — repo không có deploy">`
 - Revert PR này (`git revert` / nút Revert trên GitHub)
