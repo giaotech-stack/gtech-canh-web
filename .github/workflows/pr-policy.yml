@@ -1,0 +1,62 @@
+name: PR policy
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  title:
+    name: Tiêu đề PR
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Kiểm tra tiêu đề (Conventional Commits, không [WIP])
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if printf '%s' "$PR_TITLE" | grep -Eiq '^\[wip\]'; then
+            echo "::error::Tiêu đề PR bắt đầu bằng [WIP] — bỏ [WIP] khi sẵn sàng review."
+            exit 1
+          fi
+          if ! printf '%s' "$PR_TITLE" | grep -Eq '^(feat|fix|chore|docs|refactor|test|perf|ci|build|revert|hotfix)(\([a-z0-9._/-]+\))?!?: .+'; then
+            echo "::error::Tiêu đề PR phải dạng 'type(scope): mô tả' với type thuộc feat|fix|chore|docs|refactor|test|perf|ci|build|revert|hotfix."
+            exit 1
+          fi
+          echo "Tiêu đề hợp lệ."
+
+  secrets:
+    name: Quét secret (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Cài gitleaks v8.30.1 (kiểm sha256)
+        run: |
+          set -euo pipefail
+          VERSION=8.30.1
+          SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          TARBALL="gitleaks_${VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "${RUNNER_TEMP}/${TARBALL}" "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/${TARBALL}"
+          echo "${SHA256}  ${RUNNER_TEMP}/${TARBALL}" | sha256sum -c -
+          mkdir -p "${RUNNER_TEMP}/gitleaks"
+          tar -xzf "${RUNNER_TEMP}/${TARBALL}" -C "${RUNNER_TEMP}/gitleaks" gitleaks
+
+      - name: Quét secret trong phạm vi commit của PR
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          "${RUNNER_TEMP}/gitleaks/gitleaks" git --no-banner --redact --log-opts="${BASE_SHA}..${HEAD_SHA}"
